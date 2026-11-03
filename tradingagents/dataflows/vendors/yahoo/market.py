@@ -270,6 +270,15 @@ def get_closes(symbol: str, start_date: str, end_date: str) -> pd.Series:
     return history["Close"] if history is not None and "Close" in history else pd.Series(dtype=float)
 
 
+def get_open_close(symbol: str, start_date: str, end_date: str | None = None) -> pd.DataFrame:
+    """Split- and dividend-adjusted daily Open and Close, newest sessions included when ``end_date`` is None."""
+    canonical = normalize_symbol(symbol)
+    history = yf_retry(lambda: yf.Ticker(canonical).history(start=start_date, end=end_date, auto_adjust=True))
+    if history is None or not {"Open", "Close"} <= set(history):
+        return pd.DataFrame(columns=["Open", "Close"])
+    return history[["Open", "Close"]].dropna()
+
+
 def get_stock_stats(
     symbol: Annotated[str, "ticker symbol for the company"],
     indicator: Annotated[
