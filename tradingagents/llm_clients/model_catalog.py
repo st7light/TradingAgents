@@ -223,6 +223,17 @@ MODEL_OPTIONS: ProviderModeOptions = {
     "bedrock": _CUSTOM_ONLY,
     # The plan's models are listed live from OpenAI once signed in.
     "chatgpt": _CUSTOM_ONLY,
+    "claude_code": {
+        "quick": [
+            ("Claude Sonnet 5.5 - Speed and intelligence balance", "claude-sonnet-5-5"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("Claude Opus 5.5 - Frontier agentic work", "claude-opus-5-5"),
+            ("Claude Fable 5.1 - Most capable", "claude-fable-5-1"),
+            ("Custom model ID", "custom"),
+        ],
+    },
 }
 
 
