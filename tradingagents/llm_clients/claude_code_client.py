@@ -43,9 +43,10 @@ _DEFAULT_SYSTEM = "You are a careful research assistant. Answer from the materia
 _UNSUPPORTED_KWARGS = ("temperature", "max_tokens")
 # A tool-using agent's last turn is its report; anything this short only points at text that was lost.
 _MIN_FINAL_CHARS = 200
-# A clean turn is the answer plus, for structured output, the turn that returns it. More means the
-# model called a tool the CLI does not have, got an error, and may be reporting that error as a finding.
-_MAX_CLEAN_TURNS = 2
+# The model's answer, then the structured-output turn that returns it. The model often calls a listed
+# tool directly, which the CLI refuses; a further turn would only let it report that refusal as a finding.
+_MAX_TURNS = "2"
+_STRUCTURED_TOOL = "StructuredOutput"
 
 
 class ClaudeCodeError(RuntimeError):
@@ -121,6 +122,33 @@ def _tool_instructions(tools: list[dict]) -> str:
     )
 
 
+def _parse_stream(stdout: str) -> dict | None:
+    """The CLI's result event, plus what the model did before it.
+
+    ``direct_calls`` are the tools named in the model's first direct attempt, read as requests for
+    the graph to run. ``texts`` are prose turns, which hold the report when the structured answer
+    only points at them.
+    """
+    events = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    results = [e for e in events if e.get("type", "result") == "result"]
+    if not results:
+        return None
+    blocks = [(e["message"].get("id"), b) for e in events if e.get("type") == "assistant"
+              for b in e["message"].get("content", [])]
+    attempts = [(mid, b) for mid, b in blocks if b.get("type") == "tool_use" and b.get("name") != _STRUCTURED_TOOL]
+    first = attempts[0][0] if attempts else None
+    return {**results[-1],
+            "direct_calls": [{"name": b["name"], "args": b.get("input") or {}} for mid, b in attempts if mid == first],
+            "texts": [b.get("text", "") for _, b in blocks if b.get("type") == "text"]}
+
+
 def _usage(usage: dict) -> dict:
     prompt = sum(usage.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
     output = usage.get("output_tokens", 0)
@@ -155,7 +183,7 @@ class ChatClaudeCode(BaseChatModel):
     def _argv(self, system: str, json_schema: dict | None) -> list[str]:
         argv = [
             find_claude(self.claude_bin), "-p",
-            "--model", self.model, "--output-format", "json",
+            "--model", self.model, "--output-format", "stream-json", "--verbose", "--max-turns", _MAX_TURNS,
             "--tools", "", "--setting-sources", "", "--strict-mcp-config",
             "--no-session-persistence", "--system-prompt", system,
         ]
@@ -172,11 +200,9 @@ class ChatClaudeCode(BaseChatModel):
                                   env=_child_env(), cwd=str(WORKDIR))
         except subprocess.TimeoutExpired as exc:
             raise ClaudeCodeError(f"claude -p timed out after {self.timeout}s") from exc
-        try:
-            body = json.loads(done.stdout)
-        except json.JSONDecodeError:
-            body = {"is_error": True, "result": (done.stderr or done.stdout or "no output")[-500:]}
-        if done.returncode != 0 or body.get("is_error"):
+        body = _parse_stream(done.stdout) or {"is_error": True, "result": (done.stderr or done.stdout or "no output")[-500:]}
+        cut_short = body.get("subtype") == "error_max_turns"
+        if not cut_short and (done.returncode != 0 or body.get("is_error")):
             detail = str(body.get("result") or done.stderr or "no output")[-500:]
             if _LIMIT.search(detail):
                 raise ClaudeCodeLimitError(detail)
@@ -184,20 +210,25 @@ class ChatClaudeCode(BaseChatModel):
         return body
 
     def _message(self, body: dict, tools: list[dict] | None, response_schema: dict | None) -> AIMessage:
-        if (body.get("num_turns") or 0) > _MAX_CLEAN_TURNS:
-            raise ClaudeCodeError(f"claude -p took {body['num_turns']} turns: the model tried a tool it does not have")
         tool_calls, content = [], body.get("result") or ""
         output = body.get("structured_output")
+        direct = body.get("direct_calls") or []
+        allowed = {t["function"]["name"] for t in tools or []}
+        if direct and not any(c["name"] in allowed for c in direct):
+            raise ClaudeCodeError(f"claude -p called an unbound tool: {direct[0]['name']}")
+        if direct:
+            output = {"content": "", "tool_calls": [c for c in direct if c["name"] in allowed]}
         if (tools or response_schema) and output is None:
             raise ClaudeCodeError(f"claude -p returned no structured output: {content[-300:]!r}")
         if tools:
-            allowed = {t["function"]["name"] for t in tools}
             for call in output.get("tool_calls", []):
                 if call["name"] not in allowed:
                     raise ClaudeCodeError(f"claude -p called an unbound tool: {call['name']}")
                 tool_calls.append({"name": call["name"], "args": call.get("args") or {},
                                    "id": uuid.uuid4().hex, "type": "tool_call"})
             content = output.get("content", "")
+            if not tool_calls and len(content) < _MIN_FINAL_CHARS:
+                content = max([content, *body.get("texts", [])], key=len)
             if not tool_calls and len(content) < _MIN_FINAL_CHARS:
                 raise ClaudeCodeError(f"claude -p final answer too short: {content!r}")
         elif response_schema:

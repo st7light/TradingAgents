@@ -261,12 +261,61 @@ def test_cli_path_never_comes_from_the_environment(monkeypatch, tmp_path):
     assert "CLAUDE_BIN" not in Path(cc.__file__).read_text()
 
 
-def test_a_turn_that_tried_a_missing_tool_is_retried():
-    body = {"num_turns": 8, "structured_output": {"content": "x" * 300, "tool_calls": []}, "usage": {}}
-    with pytest.raises(cc.ClaudeCodeError, match="8 turns"):
-        _llm()._message(body, [{"function": {"name": "t"}}], None)
+def _stream(*blocks, **result):
+    events = [{"type": "assistant", "message": {"id": mid, "content": [block]}} for mid, block in blocks]
+    events.append({"type": "result", "is_error": False, "usage": {}, **result})
+    return SimpleNamespace(returncode=0, stdout="\n".join(json.dumps(e) for e in events), stderr="")
 
 
-def test_a_clean_structured_turn_passes():
-    body = {"num_turns": 2, "structured_output": {"content": "x" * 300, "tool_calls": []}, "usage": {}}
-    assert _llm()._message(body, [{"function": {"name": "t"}}], None).content == "x" * 300
+def _tool_use(name, **args):
+    return {"type": "tool_use", "name": name, "input": args}
+
+
+@tool
+def get_stock_data(symbol: str) -> str:
+    """Prices."""
+    return ""
+
+
+def test_a_direct_tool_call_becomes_a_request_for_the_graph(cli):
+    cli.replies = [_stream(("m1", _tool_use("get_stock_data", symbol="NVDA")), ("m1", _tool_use("get_stock_data", symbol="AMD")),
+                           ("m2", {"type": "text", "text": "No such tool available"}),
+                           subtype="error_max_turns", is_error=True)]
+    out = _llm().bind_tools([get_stock_data]).invoke("go")
+    assert [c["args"]["symbol"] for c in out.tool_calls] == ["NVDA", "AMD"]
+    assert out.content == ""
+    assert len(cli.calls) == 1
+
+
+def test_direct_calls_outrank_a_later_structured_report_of_their_failure(cli):
+    cli.replies = [_stream(("m1", _tool_use("get_stock_data", symbol="NVDA")),
+                           structured_output={"content": "tools failed " * 50, "tool_calls": []})]
+    out = _llm().bind_tools([get_stock_data]).invoke("go")
+    assert out.tool_calls and out.content == ""
+
+
+def test_a_direct_call_to_an_unbound_tool_is_retried(cli):
+    good = _stream(structured_output={"content": REPORT, "tool_calls": []})
+    cli.replies = [_stream(("m1", _tool_use("Bash", command="ls")), structured_output={"content": REPORT, "tool_calls": []}), good]
+    assert _llm().bind_tools([get_stock_data]).invoke("go").content == REPORT
+    assert len(cli.calls) == 2
+
+
+def test_a_report_written_outside_the_structure_is_recovered(cli):
+    cli.replies = [_stream(("m1", {"type": "text", "text": REPORT}), structured_output={"content": "위 보고서 참조", "tool_calls": []})]
+    assert _llm().bind_tools([get_stock_data]).invoke("go").content == REPORT
+    assert len(cli.calls) == 1
+
+
+def test_being_cut_short_without_a_usable_answer_is_retried(cli):
+    good = _stream(structured_output={"content": REPORT, "tool_calls": []})
+    cli.replies = [_stream(subtype="error_max_turns", is_error=True), good]
+    assert _llm().bind_tools([get_stock_data]).invoke("go").content == REPORT
+    assert len(cli.calls) == 2
+
+
+def test_limit_inside_the_stream_is_still_a_limit(cli):
+    cli.replies = [_stream(is_error=True, result="You've reached your usage limit")]
+    with pytest.raises(cc.ClaudeCodeLimitError):
+        _llm().invoke("go")
+    assert len(cli.calls) == 1
