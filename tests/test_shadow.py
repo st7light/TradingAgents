@@ -200,3 +200,10 @@ def test_an_unreadable_key_file_loads_nothing(tmp_path):
     from tradingagents.shadow.keys import load_data_keys
 
     assert load_data_keys(tmp_path / "missing") == []
+
+
+def test_a_report_that_says_its_tools_failed_is_degraded(store):
+    broken = "오류 No such tool available " + FULL
+    result = _run(store, analyze=lambda t, d: Analysis(_state(market_report=broken), "Buy", {}))
+    assert result == {"NVDA": "degraded"}
+    assert "market_report: tools failed" in store.rating("NVDA", "2026-11-03")["error"]

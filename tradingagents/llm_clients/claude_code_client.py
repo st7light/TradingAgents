@@ -43,6 +43,9 @@ _DEFAULT_SYSTEM = "You are a careful research assistant. Answer from the materia
 _UNSUPPORTED_KWARGS = ("temperature", "max_tokens")
 # A tool-using agent's last turn is its report; anything this short only points at text that was lost.
 _MIN_FINAL_CHARS = 200
+# A clean turn is the answer plus, for structured output, the turn that returns it. More means the
+# model called a tool the CLI does not have, got an error, and may be reporting that error as a finding.
+_MAX_CLEAN_TURNS = 2
 
 
 class ClaudeCodeError(RuntimeError):
@@ -112,6 +115,8 @@ def _tool_instructions(tools: list[dict]) -> str:
         + "\n\nAnswer in the required structure. To call tools, list them in tool_calls with their "
         "name and args, and leave content empty; their results come back in your next turn. "
         "When you have what you need, leave tool_calls empty and put your complete answer in content. "
+        "The listed tools cannot be called directly and a direct call always fails: "
+        "request them only through the tool_calls field. "
         "Only the structured answer is read: any text outside it is lost, so never point to it."
     )
 
@@ -179,6 +184,8 @@ class ChatClaudeCode(BaseChatModel):
         return body
 
     def _message(self, body: dict, tools: list[dict] | None, response_schema: dict | None) -> AIMessage:
+        if (body.get("num_turns") or 0) > _MAX_CLEAN_TURNS:
+            raise ClaudeCodeError(f"claude -p took {body['num_turns']} turns: the model tried a tool it does not have")
         tool_calls, content = [], body.get("result") or ""
         output = body.get("structured_output")
         if (tools or response_schema) and output is None:

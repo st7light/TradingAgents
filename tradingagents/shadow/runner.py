@@ -22,6 +22,7 @@ _REQUIRED_REPORTS = ("market_report", "sentiment_report", "news_report", "fundam
                      "final_trade_decision")
 _FINAL_STATUSES = ("ok", "degraded")
 _MAX_ERROR_CHARS = 500
+_TOOL_FAILURE = "No such tool available"
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,8 @@ def in_blocked_window(now: datetime) -> bool:
 def _quality_problems(analysis: Analysis) -> list[str]:
     thin = [k for k in _REQUIRED_REPORTS if len(analysis.state.get(k) or "") < _MIN_REPORT_CHARS]
     unreadable = [] if analysis.rating in RATINGS_5_TIER else [f"rating={analysis.rating}"]
-    return thin + unreadable
+    broken = [k for k in _REQUIRED_REPORTS if _TOOL_FAILURE in (analysis.state.get(k) or "")]
+    return thin + unreadable + [f"{k}: tools failed" for k in broken]
 
 
 def _is_limit(exc: BaseException | None) -> bool:

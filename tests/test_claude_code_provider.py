@@ -259,3 +259,14 @@ def test_cli_path_never_comes_from_the_environment(monkeypatch, tmp_path):
     monkeypatch.setattr(cc.Path, "exists", lambda self: str(self) == "/real/claude")
     assert cc.find_claude(None) == "/real/claude"
     assert "CLAUDE_BIN" not in Path(cc.__file__).read_text()
+
+
+def test_a_turn_that_tried_a_missing_tool_is_retried():
+    body = {"num_turns": 8, "structured_output": {"content": "x" * 300, "tool_calls": []}, "usage": {}}
+    with pytest.raises(cc.ClaudeCodeError, match="8 turns"):
+        _llm()._message(body, [{"function": {"name": "t"}}], None)
+
+
+def test_a_clean_structured_turn_passes():
+    body = {"num_turns": 2, "structured_output": {"content": "x" * 300, "tool_calls": []}, "usage": {}}
+    assert _llm()._message(body, [{"function": {"name": "t"}}], None).content == "x" * 300
